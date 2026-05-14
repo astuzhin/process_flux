@@ -49,9 +49,6 @@ void McRW::load_tree() {
         uint16_t bin_tr = static_cast<uint16_t>(rbins->FindBin(rig_tr));
         uint16_t bin_acc = static_cast<uint16_t>(rbins_acc->FindBin(rig_tr));
 
-        // std::cout << Form("rig_in: %f, rig_tf: %f, rig_l1: %f, rig_tr: %f, rig_gen: %f", rig_in, rig_tf, rig_l1, rig_tr, vars.rig_gen) << std::endl;
-        // std::cout << Form("bin_in: %d, bin_tf: %d, bin_l1: %d, bin_tr: %d, bin_gen: %d", bin_in, bin_tf, bin_l1, bin_tr, bin_gen) << std::endl << std::endl;
-
         rig_gen.push_back(vars.rig_gen);
         mask.push_back(vars.mask);
         rig_bin_idx[Det::inn].push_back(bin_in);

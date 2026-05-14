@@ -49,17 +49,17 @@ class McRW {
     };
 
     void set_rbins(const std::vector<double>& rbins, const std::vector<double>& rbins_acc);
+
+    
     void load_tree();
+    
     void fill_sums(const std::vector<double>& weights = {});
-    const McFileInfo& get_mc_file_info() {
-        return mc_file_info;
-    };
-    const std::array<std::pair<std::vector<double>, std::vector<double>>, 5>& get_sums_pass() {
-        return sums_pass;
-    }
-    const std::array<std::pair<std::vector<double>, std::vector<double>>, 5>& get_sums_total() {
-        return sums_total;
-    }
+    
+    const McFileInfo& get_mc_file_info() {return mc_file_info;};
+    
+    const std::array<std::pair<std::vector<double>, std::vector<double>>, 5>& get_sums_pass() {return sums_pass;};
+    
+    const std::array<std::pair<std::vector<double>, std::vector<double>>, 5>& get_sums_total() {return sums_total;};
 
     private:
     TFile* file;

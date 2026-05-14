@@ -14,18 +14,23 @@ def calc_spline(gr):
     det = gr.name[0]
     gr = gr.dropna()
     x = gr.index.get_level_values('rig').mid
-    xmin = const.X_LIMS[det][0]
-    xmax = const.X_LIMS[det][1]
-    model = pyspl.fit_spline(x, gr['corr_avg2mc'], gr['corr_avg2mc_err'], mode="log-lin", extrapolation=['tangent', 'constant'], lam=5, x_low=xmin, x_high=xmax)
+    # xmin = const.X_LIMS[det][0]
+    # xmax = const.X_LIMS[det][1]
+    model = pyspl.fit_spline(x, gr['corr_avg2mc'], gr['corr_avg2mc_err'], mode="log-lin", extrapolation=['tangent', 'constant'], lam=5, x_low=x.min(), x_high=x.max())
     gr['corr_avg2mc_spl'] = pyspl.eval_spline(model, x)
     return gr
 
 def process_day(time):
     try:
         cr_day = proc_data.count_rate.loc[time, ["cr", "cr_err"]]
+    except:
+        print(f"Time {time} not found in count rate")
+        return None
+
+    try:
         eff_daily_day = proc_data.effs_daily.xs(time, level='time')
     except:
-        print(f"Time {time} not found")
+        print(f"Time {time} not found in efficiencies")
         return None
 
     cr_day = cr_day.dropna()
@@ -78,6 +83,17 @@ def process_day(time):
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from tqdm import tqdm
 
+proc_data = None
+proc_mc = None
+def init_worker():
+    global proc_data, proc_mc
+    proc_data = ProcessorData(str(const.ISS_PATH), prefix="_last")
+    proc_data.load()
+    proc_data.count_rate = proc_data.count_rate.loc["2012-01-01":"2025-01-01"]
+
+    proc_mc = ProcessorMC(str(const.MC_PATH))
+    proc_mc.calc_acc_gen()
+
 def process(time):
     try:
         fx = process_day(time)
@@ -107,19 +123,15 @@ if __name__ == "__main__":
     print("Loading count rate and efficiencies")
     proc_data.load()
 
-    proc_mc = ProcessorMC(str(const.MC_PATH))
-    proc_mc.calc_acc_gen()
-
     proc_data.count_rate = proc_data.count_rate.loc["2012-01-01":"2025-01-01"]
     times = proc_data.count_rate.index.get_level_values('time').unique()
     times = times[(times >= t1) & (times < t2)]
 
     data = {}
-    with ProcessPoolExecutor(max_workers=16) as executor:
+    with ProcessPoolExecutor(max_workers=4, initializer=init_worker) as executor:
         futures = {executor.submit(process, time): time for time in times}
         for future in tqdm(as_completed(futures), total=len(futures), desc="Processing days"):
             time = futures[future]
-            # print(time)
             data[time] = future.result()
     data = pd.concat(data, names=['time']).sort_index()
     data.to_pickle(const.DATA_DIR / f"flux_{ProcID}.pkl")

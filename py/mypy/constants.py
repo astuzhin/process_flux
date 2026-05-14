@@ -132,8 +132,6 @@ TF_AVG_PERIODS = pd.DatetimeIndex([
     TMAX_GLOB,
 ])
 
-DET_ORDER = ('in', 'tf', 'l1', 'tr')
-
 AVG_PERIODS = {
     'in': IN_AVG_PERIODS,
     'tr': TR_AVG_PERIODS,
@@ -142,8 +140,29 @@ AVG_PERIODS = {
 }
 
 X_LIMS = {
-    'in': (None, 5.0),
-    'l1': (1.5 , 10.0),
+    'in': (None, 10.0),
+    'l1': (None, 10.0),
     'tf': (None, 10.0),
     'tr': (None, 10.0),
 }
+
+
+IN = 0
+TF = 1
+L1 = 2
+TR = 3
+DETS = {
+    'in': IN,
+    'tf': TF,
+    'l1': L1,
+    'tr': TR,
+}
+
+IN_P = 1 << 0
+IN_T = 1 << 1
+TF_P = 1 << 2
+TF_T = 1 << 3
+L1_P = 1 << 4
+L1_T = 1 << 5
+MAIN_PHYS = 1 << 6
+MAIN_UNB = 1 << 7

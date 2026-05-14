@@ -11,7 +11,73 @@ from . import constants as const
 
 from scipy.optimize import curve_fit
 
-def calc_eff_weighted(p, t, p_w2, t_w2, index=None):
+from numba import njit
+
+@njit
+def fill_sums_numba(mask, bins_in, bins_tf, bins_l1, bins_tr, bins_acc, weights, n_rbins, n_abins):
+    sums_pass = np.zeros((4, n_rbins), dtype=np.float64)
+    sums_pass2 = np.zeros((4, n_rbins), dtype=np.float64)
+    sums_total = np.zeros((4, n_rbins), dtype=np.float64)
+    sums_total2 = np.zeros((4, n_rbins), dtype=np.float64)
+
+    acc_pass = np.zeros(n_abins, dtype=np.float64)
+    acc_pass2 = np.zeros(n_abins, dtype=np.float64)
+
+    use_weights = len(weights) > 0
+
+    for i in range(len(mask)):
+        w = weights[i] if use_weights else 1.0
+        w2 = w * w
+        m = mask[i]
+
+        # l1
+        if m & const.L1_T:
+            b = bins_l1[i]
+            sums_total[const.L1, b] += w
+            sums_total2[const.L1, b] += w2
+            if m & const.L1_P:
+                sums_pass[const.L1, b] += w
+                sums_pass2[const.L1, b] += w2
+
+        # tf
+        if m & const.TF_T:
+            b = bins_tf[i]
+            sums_total[const.TF, b] += w
+            sums_total2[const.TF, b] += w2
+            if m & const.TF_P:
+                sums_pass[const.TF, b] += w
+                sums_pass2[const.TF, b] += w2
+
+        # inn
+        if m & const.IN_T:
+            b = bins_in[i]
+            sums_total[const.IN, b] += w
+            sums_total2[const.IN, b] += w2
+            if m & const.IN_P:
+                sums_pass[const.IN, b] += w
+                sums_pass2[const.IN, b] += w2
+
+        pass_phys = (m & const.MAIN_PHYS) != 0
+        pass_unb = (m & const.MAIN_UNB) != 0
+
+        # tr
+        if pass_phys or pass_unb:
+            b = bins_tr[i]
+            sums_total[const.TR, b] += w
+            sums_total2[const.TR, b] += w2
+            if pass_phys:
+                sums_pass[const.TR, b] += w
+                sums_pass2[const.TR, b] += w2
+
+        # acc
+        if pass_phys:
+            b = bins_acc[i]
+            acc_pass[b] += w
+            acc_pass2[b] += w2
+
+    return sums_pass[:, 1:-1], sums_pass2[:, 1:-1], sums_total[:, 1:-1], sums_total2[:, 1:-1], acc_pass[1:-1], acc_pass2[1:-1]
+
+def calc_eff_weighted(p, t, p_w2, t_w2):
     p = np.asarray(p)
     t = np.asarray(t)
     p_w2 = np.asarray(p_w2)
@@ -20,8 +86,7 @@ def calc_eff_weighted(p, t, p_w2, t_w2, index=None):
     var = np.divide(p_w2 * (1.0 - 2.0 * eff) + t_w2 * eff * eff, t * t, out=np.zeros_like(p, dtype=float), where=t != 0)
     var = np.maximum(var, 0.0)
     err = np.sqrt(var)
-    cols = {"eff": eff, "eff_err": err}
-    return pd.DataFrame(cols) if index is None else pd.DataFrame(cols, index=index)
+    return eff, err
 
 p0 =          [0.0, 20.0, 2.5, 1.0, 1.0]
 bounds = ([-np.inf, 1.0, 0.0, 0.01, 0.2], 
@@ -41,41 +106,34 @@ def acc_spline(x_new, x, y):
 
 class ProcessorMC:
     def __init__(self, file_path):
-        self.init_root_cpp()
+        file = up.open(file_path)
+        tree = file['eff_tree']
+        
+        self.ngen = file['mc_info_tree'].arrays(library="np")['Ngen'].sum()
 
-        self.file_path = file_path
-        self.file_mc = up.open(file_path)
-        self.mc_rw = ROOT.McRW(str(file_path))
-        self.mc_rw.set_rbins(const.RBINS_EDGES, const.RBINS_ACC_EDGES)
-
-        self.mc_rw.load_tree()
-    
-    def init_root_cpp(self):
-        ROOT.gErrorIgnoreLevel = ROOT.kError
-        inc = const.INCLUDE_DIR.resolve().as_posix()
-        bld = const.BUILD_DIR.resolve().as_posix()
-
-        ext = ".dylib" if platform.system() == "Darwin" else ".so"
-        lib = f"{bld}/libprocess_flux{ext}"
-
-        headers = (
-            "McRW.hpp",
-        )
-        for h in headers:
-            ROOT.gInterpreter.ProcessLine(f'#include "{inc}/{h}"')
-        ROOT.gSystem.Load(str(lib))
-
-    def calc_acc_gen(self):
-        n_gen = self.file_mc["mc_info_tree"].arrays(library="np")['Ngen'].sum()
-        tree = self.file_mc["eff_tree"]
+        rig = tree['rig'].array(library="np")
         self.rig_gen = tree['rig_gen'].array(library="np")
-        mask = tree['mask'].array(library="np")
-        pass_phys = (mask & (1 << ROOT.Cuts.main_phys)) != 0
-        acc_gen_p = np.histogram(self.rig_gen[pass_phys], bins=const.RBINS_ACC_EDGES)[0]
-        self.acc_gen_t = n_gen * np.log(const.RBINS_ACC_EDGES[1:] / const.RBINS_ACC_EDGES[:-1]) / np.log(const.RIG_MAX / const.RIG_MIN)
-        self.acc_gen = calc_eff_weighted(acc_gen_p, self.acc_gen_t, acc_gen_p, self.acc_gen_t, index=const.RBINS_ACC) * np.pi * 3.9**2
-    
-    def reweight(self, flux_model_x, flux_model_y, flux_model_y_err):
+        rig_beta = tree['rig_beta'].array(library="np")
+        rig_inn = tree['rig_inn'].array(library="np")
+        rig_inl1 = tree['rig_inl1'].array(library="np")
+        self.mask = tree['mask'].array(library="np")
+
+        self.acc_gen_p = np.histogram(self.rig_gen[(self.mask & const.MAIN_PHYS) != 0], bins=const.RBINS_ACC_EDGES)[0]
+        self.acc_gen_t = self.ngen * np.log(const.RBINS_ACC_EDGES[1:] / const.RBINS_ACC_EDGES[:-1]) / np.log(const.RIG_MAX / const.RIG_MIN)
+        eff, err = calc_eff_weighted(self.acc_gen_p, self.acc_gen_t, self.acc_gen_p, self.acc_gen_t)
+        self.acc_gen = pd.DataFrame({'eff': eff.ravel(), 'err': err.ravel()}, index=const.RBINS_ACC) * np.pi * 3.9**2
+
+        self.bins = {
+            "in": np.digitize(np.where(rig_beta < 5.0, rig_beta, self.rig_gen), const.RBINS_EDGES).astype(np.uint16),
+            "l1": np.digitize(rig_inn, const.RBINS_EDGES).astype(np.uint16),
+            "tf": np.digitize(rig_inl1, const.RBINS_EDGES).astype(np.uint16),
+            "tr": np.digitize(rig, const.RBINS_EDGES).astype(np.uint16),
+            "acc": np.digitize(rig, const.RBINS_ACC_EDGES).astype(np.uint16)
+        }
+
+        self._eff_idx = pd.MultiIndex.from_product([const.DETS.keys(), const.RBINS], names=['det', 'rig'])
+
+    def calc_weights(self, flux_model_x, flux_model_y, flux_model_y_err):
         norm = np.trapezoid(flux_model_y, flux_model_x)
         flux_model_y /= norm
         flux_model_y_err /= norm
@@ -85,78 +143,23 @@ class ProcessorMC:
         self.popt = popt
         weights = np.exp(broken_power_low_energy_log(self.rig_gen, *popt))
         weights *= (self.rig_gen * np.log(const.RIG_MAX / const.RIG_MIN))
-        weights_acc = np.exp(broken_power_low_energy_log(const.RBINS_ACC.mid, *popt))
-        weights_acc *= (const.RBINS_ACC.mid * np.log(const.RIG_MAX / const.RIG_MIN))
-        self.mc_rw.fill_sums(weights)
+        x_acc = const.RBINS_ACC.mid.to_numpy(copy=True)
+        weights_acc = np.exp(broken_power_low_energy_log(x_acc, *popt))
+        weights_acc *= (x_acc * np.log(const.RIG_MAX / const.RIG_MIN))
+        return weights, weights_acc
 
-        df = {}
-        for det in ROOT.DetList:
-            if det == ROOT.Det.acc:
-                continue
-            p, p_w2 = self.mc_rw.get_sums_pass()[det]
-            t, t_w2 = self.mc_rw.get_sums_total()[det]
-            gr = calc_eff_weighted(p, t, p_w2, t_w2)
-            gr = gr.iloc[1:-1]
-            gr.index = const.RBINS
-            df[ROOT.DetNames[det]] = gr
-        df = pd.concat(df)
-        df.index.names = ["det", "rig"]
+    def reweight(self, flux_model_x, flux_model_y, flux_model_y_err):
+        weights, weights_acc = self.calc_weights(flux_model_x, flux_model_y, flux_model_y_err)
+        p, p_w2, t, t_w2, acc_p, acc_p_w2 = fill_sums_numba(
+            self.mask, self.bins["in"], self.bins["tf"], self.bins["l1"], self.bins["tr"], self.bins["acc"], 
+            weights, len(const.RBINS_EDGES) + 1, len(const.RBINS_ACC_EDGES) + 1)
+        eff, err = calc_eff_weighted(p, t, p_w2, t_w2)
+        self.effs_mc = pd.DataFrame({'eff': eff.ravel(), 'eff_err': err.ravel()}, index=self._eff_idx)
 
-        self.effs_mc = df
-
-        acc_p = np.array(self.mc_rw.get_sums_pass()[ROOT.Det.acc][0])[1:-1]
-        acc_p_w2 = np.array(self.mc_rw.get_sums_pass()[ROOT.Det.acc][1])[1:-1]
         acc_t = self.acc_gen_t * weights_acc
         acc_t_w2 = self.acc_gen_t * weights_acc ** 2
-        self.acc = calc_eff_weighted(acc_p, acc_t, acc_p_w2, acc_t_w2, index=const.RBINS_ACC) * np.pi * 3.9**2
-
-    def reweight_old(self, cr=None):
-        if cr is not None:
-            cr = cr[cr.index.mid < 100].dropna()
-            norm = np.trapezoid(cr['cr'], cr.index.mid)
-            cr = cr[['cr', 'cr_err']] / norm
-            p0 = [np.log(np.max(cr['cr'])), 20.0, 2.5, 2.7, 1.0, 1.0]
-            bounds = ([-np.inf, 1.0, 0.0, 0.01, 0.2], 
-                      [np.inf, 80.0, 5.0, 20.0, 8.0])
-            self.cr_pdf = cr
-            popt, pcov = curve_fit(broken_power_low_energy_log, cr.index.mid, np.log(cr['cr']), 
-                p0=p0, sigma=cr['cr_err'] / cr['cr'], absolute_sigma=True, maxfev=100000)
-            # model_cr = pyspl.fit_spline(
-            #     cr.index.mid, cr['cr'] / norm, cr['cr_err'] / norm, 
-            #     mode="log-log", extrapolation="tangent", 
-            #     lam=0.5, x_low=cr.index.mid.min(), x_high=100)
-            # weights = pyspl.eval_spline(model_cr, self.rig_gen) * self.rig_gen * np.log(const.RIG_MAX / const.RIG_MIN)
-            # self.model_cr = model_cr
-            self.popt = popt
-            weights = np.exp(broken_power_low_energy_log(self.rig_gen, *popt))
-            weights *= (self.rig_gen * np.log(const.RIG_MAX / const.RIG_MIN))
-            weights_acc = np.exp(broken_power_low_energy_log(const.RBINS_ACC.mid, *popt))
-            weights_acc *= (const.RBINS_ACC.mid * np.log(const.RIG_MAX / const.RIG_MIN))
-            self.mc_rw.fill_sums(weights)
-        else:
-            self.mc_rw.fill_sums()
-            weights_acc = 1
-
-        df = {}
-        for det in ROOT.DetList:
-            if det == ROOT.Det.acc:
-                continue
-            p, p_w2 = self.mc_rw.get_sums_pass()[det]
-            t, t_w2 = self.mc_rw.get_sums_total()[det]
-            gr = calc_eff_weighted(p, t, p_w2, t_w2)
-            gr = gr.iloc[1:-1]
-            gr.index = const.RBINS
-            df[ROOT.DetNames[det]] = gr
-        df = pd.concat(df)
-        df.index.names = ["det", "rig"]
-
-        self.effs_mc = df
-
-        acc_p = np.array(self.mc_rw.get_sums_pass()[ROOT.Det.acc][0])[1:-1]
-        acc_p_w2 = np.array(self.mc_rw.get_sums_pass()[ROOT.Det.acc][1])[1:-1]
-        acc_t = self.acc_gen_t * weights_acc
-        acc_t_w2 = self.acc_gen_t * weights_acc ** 2
-        self.acc = calc_eff_weighted(acc_p, acc_t, acc_p_w2, acc_t_w2, index=const.RBINS_ACC) * np.pi * 3.9**2
+        eff, err = calc_eff_weighted(acc_p, acc_t, acc_p_w2, acc_t_w2)
+        self.acc = pd.DataFrame({'eff': eff.ravel(), 'err': err.ravel()}, index=const.RBINS_ACC) * np.pi * 3.9**2
 
 class ProcessorData:
     def __init__(self, file_path, prefix=""):
