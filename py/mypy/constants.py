@@ -8,6 +8,7 @@ BUILD_DIR = PROJECT_PATH / "build"
 DATA_DIR = PROJECT_PATH / "data"
 ISS_PATH = DATA_DIR / "data.root"
 MC_PATH = DATA_DIR / "mc_05100_f8.root"
+PREFIX = ""
 
 
 RIG_MIN = 0.5
@@ -139,11 +140,18 @@ AVG_PERIODS = {
     'tf': TF_AVG_PERIODS,
 }
 
-X_LIMS = {
-    'in': (None, 10.0),
+X_LIMS_DAY2AVG = {
+    'in': (None, 5.0),
     'l1': (None, 10.0),
     'tf': (None, 10.0),
     'tr': (None, 10.0),
+}
+
+X_LIMS_AVG2MC = {
+    'in': (None, 5.0),
+    'l1': (None, 60.0),
+    'tf': (None, None),
+    'tr': (None, None),
 }
 
 
@@ -166,3 +174,5 @@ L1_P = 1 << 4
 L1_T = 1 << 5
 MAIN_PHYS = 1 << 6
 MAIN_UNB = 1 << 7
+
+EFF_IDX = pd.MultiIndex.from_product([DETS.keys(), RBINS], names=['det', 'rig'])

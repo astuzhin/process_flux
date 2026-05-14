@@ -98,11 +98,68 @@ def broken_power_low_energy_log(R, logA, Rb, gamma1, Rc, alpha):
     log_low = -(Rc / R)**alpha
     return logA + log_broken + log_low
 
+@njit(cache=True)
+def bplel_weights_numba(R, logA, Rb, gamma1, Rc, alpha, log_ratio, out):
+    """Compute weights = exp(broken_power_low_energy_log(R, ...)) * R * log_ratio in-place.
+
+    Equivalent to the numpy expression but in a single pass with zero
+    N_mc-sized temporaries. Result is written into `out`.
+    """
+    s = 0.5
+    gamma2 = 2.7
+    inv_s = 1.0 / s
+    coef = (gamma2 - gamma1) * s
+    n = R.shape[0]
+    for i in range(n):
+        r = R[i]
+        r_rb = r / Rb
+        log_broken = -gamma1 * np.log(r_rb) - coef * np.log1p(r_rb ** inv_s)
+        log_low = -(Rc / r) ** alpha
+        out[i] = np.exp(logA + log_broken + log_low) * r * log_ratio
+
 def acc_spline(x_new, x, y):
         lx = np.log(x)
         y_smooth = pd.Series(y, index=lx).rolling(window=75, center=True, min_periods=1).mean()
         y_new = np.interp(np.log(x_new), lx, y_smooth)
         return y_new
+
+def calc_weights(rig_gen, flux_model_x, flux_model_y, flux_model_y_err, weights_out=None):
+    """Fit a broken-power-low model to the (x,y) flux and compute MC reweighting weights.
+
+    If `weights_out` is provided, the N_mc weights are written into it in-place
+    (no allocation). Otherwise a fresh array is allocated. `weights_out` must
+    have shape (len(rig_gen),) and dtype float64.
+    """
+    norm = np.trapezoid(flux_model_y, flux_model_x)
+    flux_model_y /= norm
+    flux_model_y_err /= norm
+    p0[0] = np.log(np.max(flux_model_y))
+    popt, pcov = curve_fit(broken_power_low_energy_log, flux_model_x, np.log(flux_model_y), 
+        p0=p0, sigma=flux_model_y_err / flux_model_y, absolute_sigma=True, maxfev=100000, bounds=bounds)
+
+    log_ratio = np.log(const.RIG_MAX / const.RIG_MIN)
+
+    if weights_out is None:
+        weights_out = np.empty(rig_gen.shape[0], dtype=np.float64)
+    bplel_weights_numba(rig_gen, *popt, log_ratio, weights_out)
+
+    x_acc = const.RBINS_ACC.mid.to_numpy(copy=True)
+    weights_acc = np.exp(broken_power_low_energy_log(x_acc, *popt))
+    weights_acc *= x_acc
+    weights_acc *= log_ratio
+    return weights_out, weights_acc
+
+def reweight(rig_gen, mask, bins, acc_gen_t, flux_model_x, flux_model_y, flux_model_y_err, weights_out=None):
+    weights, weights_acc = calc_weights(rig_gen, flux_model_x, flux_model_y, flux_model_y_err, weights_out=weights_out)
+    p, p_w2, t, t_w2, acc_p, acc_p_w2 = fill_sums_numba(mask, bins["in"], bins["tf"], bins["l1"], bins["tr"], bins["acc"], 
+                                                        weights, len(const.RBINS_EDGES) + 1, len(const.RBINS_ACC_EDGES) + 1)
+    eff, err = calc_eff_weighted(p, t, p_w2, t_w2)
+    effs_mc = pd.DataFrame({'eff': eff.ravel(), 'eff_err': err.ravel()}, index=const.EFF_IDX)
+    acc_t = acc_gen_t * weights_acc
+    acc_t_w2 = acc_gen_t * weights_acc ** 2
+    eff, err = calc_eff_weighted(acc_p, acc_t, acc_p_w2, acc_t_w2)
+    acc = pd.DataFrame({'eff': eff.ravel(), 'err': err.ravel()}, index=const.RBINS_ACC) * np.pi * 3.9**2
+    return effs_mc, acc
 
 class ProcessorMC:
     def __init__(self, file_path):
@@ -132,34 +189,6 @@ class ProcessorMC:
         }
 
         self._eff_idx = pd.MultiIndex.from_product([const.DETS.keys(), const.RBINS], names=['det', 'rig'])
-
-    def calc_weights(self, flux_model_x, flux_model_y, flux_model_y_err):
-        norm = np.trapezoid(flux_model_y, flux_model_x)
-        flux_model_y /= norm
-        flux_model_y_err /= norm
-        p0[0] = np.log(np.max(flux_model_y))
-        popt, pcov = curve_fit(broken_power_low_energy_log, flux_model_x, np.log(flux_model_y), 
-            p0=p0, sigma=flux_model_y_err / flux_model_y, absolute_sigma=True, maxfev=100000, bounds=bounds)
-        self.popt = popt
-        weights = np.exp(broken_power_low_energy_log(self.rig_gen, *popt))
-        weights *= (self.rig_gen * np.log(const.RIG_MAX / const.RIG_MIN))
-        x_acc = const.RBINS_ACC.mid.to_numpy(copy=True)
-        weights_acc = np.exp(broken_power_low_energy_log(x_acc, *popt))
-        weights_acc *= (x_acc * np.log(const.RIG_MAX / const.RIG_MIN))
-        return weights, weights_acc
-
-    def reweight(self, flux_model_x, flux_model_y, flux_model_y_err):
-        weights, weights_acc = self.calc_weights(flux_model_x, flux_model_y, flux_model_y_err)
-        p, p_w2, t, t_w2, acc_p, acc_p_w2 = fill_sums_numba(
-            self.mask, self.bins["in"], self.bins["tf"], self.bins["l1"], self.bins["tr"], self.bins["acc"], 
-            weights, len(const.RBINS_EDGES) + 1, len(const.RBINS_ACC_EDGES) + 1)
-        eff, err = calc_eff_weighted(p, t, p_w2, t_w2)
-        self.effs_mc = pd.DataFrame({'eff': eff.ravel(), 'eff_err': err.ravel()}, index=self._eff_idx)
-
-        acc_t = self.acc_gen_t * weights_acc
-        acc_t_w2 = self.acc_gen_t * weights_acc ** 2
-        eff, err = calc_eff_weighted(acc_p, acc_t, acc_p_w2, acc_t_w2)
-        self.acc = pd.DataFrame({'eff': eff.ravel(), 'err': err.ravel()}, index=const.RBINS_ACC) * np.pi * 3.9**2
 
 class ProcessorData:
     def __init__(self, file_path, prefix=""):
@@ -201,34 +230,36 @@ class ProcessorData:
         self.effs_daily = {}
 
         def calc_spline(gr, xmin=None, xmax=None):
-            gr = gr.dropna()
-            x = gr.index.get_level_values('rig').mid
+            gr_filtered = gr.dropna()
+            x = gr_filtered.index.get_level_values('rig').mid
             xmin = x.min() if xmin is None else xmin
             xmax = x.max() if xmax is None else xmax
             if len(x[(x > xmin) & (x < xmax)]) < 5:
                 return None
-            model = pyspl.fit_spline(x, gr['eff_daily2avg'], gr['eff_daily2avg_err'], mode="log-lin", extrapolation=['tangent', 'constant'], lam=5, x_low=xmin, x_high=xmax)
-            gr['eff_daily2avg_spl'] = pyspl.eval_spline(model, x)
+            model = pyspl.fit_spline(x, gr_filtered['eff_daily2avg'], gr_filtered['eff_daily2avg_err'], mode="log-lin", extrapolation=['tangent', 'constant'], lam=5, x_low=xmin, x_high=xmax)
+            gr['eff_daily2avg_spl'] = pyspl.eval_spline(model, gr.index.get_level_values('rig').mid)
             return gr
         
         for key, gr in self.effs.items():
             tbins_avg = pd.cut(gr.index.get_level_values('time'), bins=const.AVG_PERIODS[key], right=False)
 
             # daily efficiencies
-            df_daily = calc_eff_weighted(gr['p'], gr['t'], gr['pw2'], gr['tw2'], index=gr.index)
+            eff, err = calc_eff_weighted(gr['p'], gr['t'], gr['pw2'], gr['tw2'])
+            df_daily = pd.DataFrame({'eff_daily': eff.ravel(), 'eff_err_daily': err.ravel()}, index=gr.index)
             df_daily['time_avg'] = tbins_avg
 
             # average efficiencies
             df = gr.groupby([tbins_avg, 'rig']).sum()
-            df_avg = calc_eff_weighted(df['p'], df['t'], df['pw2'], df['tw2'], index=df.index)
+            eff, err = calc_eff_weighted(df['p'], df['t'], df['pw2'], df['tw2'])
+            df_avg = pd.DataFrame({'eff_avg': eff.ravel(), 'eff_err_avg': err.ravel()}, index=df.index)
             df_avg.index.names = ['time_avg', 'rig']
             self.effs_avg[key] = df_avg
 
             df_daily = df_daily.reset_index().merge(df_avg.reset_index(), on=['time_avg', 'rig'], how='left', suffixes=('_daily', '_avg')).dropna().set_index(['time', 'rig']).sort_index()
             df_daily['eff_daily2avg'] = df_daily['eff_daily'] / df_daily['eff_avg']
-            df_daily['eff_daily2avg_err'] = ((df_daily['eff_err_daily'] / df_daily['eff_daily']) ** 2) ** 0.5
+            df_daily['eff_daily2avg_err'] = ((df_daily['eff_err_daily'] / df_daily['eff_daily']) ** 2 + (df_daily['eff_err_avg'] / df_daily['eff_avg']) ** 2) ** 0.5
 
-            df_daily = df_daily.groupby('time', group_keys=False).apply(calc_spline, xmin=const.X_LIMS[key][0], xmax=const.X_LIMS[key][1])
+            df_daily = df_daily.groupby('time', group_keys=False).apply(calc_spline, xmin=const.X_LIMS_DAY2AVG[key][0], xmax=const.X_LIMS_DAY2AVG[key][1])
             
             self.effs_daily[key] = df_daily
 
@@ -245,8 +276,3 @@ class ProcessorData:
         self.effs_daily = pd.read_pickle(f"{const.DATA_DIR}/effs_daily{self.prefix}.pkl")
         self.effs_avg = pd.read_pickle(f"{const.DATA_DIR}/effs_avg{self.prefix}.pkl")
 
-
-class Processor:
-    def __init__(self):
-        self.path_iss = const.ISS_PATH
-        self.path_mc = const.MC_PATH
