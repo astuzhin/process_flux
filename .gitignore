@@ -1,0 +1,56 @@
+# --- CMake / C++ (ROOT) ---
+build/
+cmake-build-*/
+out/
+install/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+CMakeUserPresets.json
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+.eggs/
+dist/
+*.egg
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.pytype/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+*.ipynb
+
+# --- IDE / редакторы ---
+.idea/
+.vscode/
+.cache/
+*.swp
+*.swo
+*~
+
+# --- ОС ---
+.DS_Store
+Thumbs.db
+
+# --- Локальные данные / секреты (при необходимости раскомментируйте) ---
+data/
+# *.csv
+# .env
+# .env.*
