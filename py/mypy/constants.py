@@ -99,19 +99,40 @@ RBINS_ACC = pd.IntervalIndex.from_breaks(RBINS_ACC_EDGES, name="rig_acc", closed
 TMIN_GLOB = pd.Timestamp("2011-05-23", tz="UTC") # start
 TMAX_GLOB = pd.Timestamp("2025-10-01", tz="UTC") # end
 
+# IN_AVG_PERIODS = pd.DatetimeIndex([
+#     TMIN_GLOB,
+#     pd.Timestamp("2011-07-21", tz="UTC"), # Calibration period
+#     pd.Timestamp("2011-12-01", tz="UTC"), # 6 ladder on X dead
+#     pd.Timestamp("2014-05-08", tz="UTC"), # one ladder on Y dead
+#     pd.Timestamp("2017-03-01", tz="UTC"), # one ladder on Y dead
+#     pd.Timestamp("2019-09-24", tz="UTC"), # ISS power cut
+#     TMAX_GLOB,
+# ])
+
+TR_AVG_PERIODS = pd.DatetimeIndex([
+    TMIN_GLOB,
+    pd.Timestamp("2013-11-26", tz="UTC"), # TOF-PMT config
+    pd.Timestamp("2016-02-26", tz="UTC"), # TOF-PMT config
+    pd.Timestamp("2020-02-18", tz="UTC"), # TOF-PMT config
+    pd.Timestamp("2021-05-03", tz="UTC"), # TOF-PMT config
+    pd.Timestamp("2021-11-02", tz="UTC"), # TOF-PMT config
+    pd.Timestamp("2023-02-02", tz="UTC"), # TOF-PMT config
+    TMAX_GLOB,
+])
+
 IN_AVG_PERIODS = pd.DatetimeIndex([
     TMIN_GLOB,
     pd.Timestamp("2011-07-21", tz="UTC"), # Calibration period
     pd.Timestamp("2011-12-01", tz="UTC"), # 6 ladder on X dead
+    pd.Timestamp("2012-10-29", tz="UTC"), # 6 ladder on X dead
     pd.Timestamp("2014-05-08", tz="UTC"), # one ladder on Y dead
-    pd.Timestamp("2017-03-01", tz="UTC"), # one ladder on Y dead
-    pd.Timestamp("2019-09-24", tz="UTC"), # ISS power cut
-    TMAX_GLOB,
-])
-
-TR_AVG_PERIODS = pd.DatetimeIndex([
-    TMIN_GLOB,
-    pd.Timestamp("2013-11-27", tz="UTC"), # TOF-PMT config
+    pd.Timestamp("2017-02-28", tz="UTC"), # one ladder on Y dead
+    # pd.Timestamp("2018-02-27", tz="UTC"), # one ladder on Y dead
+    pd.Timestamp("2018-12-04", tz="UTC"), # Something
+    pd.Timestamp("2019-05-03", tz="UTC"), # Something
+    pd.Timestamp("2019-09-24", tz="UTC"), # Something
+    pd.Timestamp("2020-01-27", tz="UTC"), # Something
+    pd.Timestamp("2021-03-05", tz="UTC"), # Something
     TMAX_GLOB,
 ])
 
@@ -121,10 +142,13 @@ L1_AVG_PERIODS = pd.DatetimeIndex([
     pd.Timestamp("2011-12-01", tz="UTC"), # 6 ladder on X dead
     pd.Timestamp("2012-10-29", tz="UTC"), # 6 ladder on X dead
     pd.Timestamp("2014-05-08", tz="UTC"), # one ladder on Y dead
-    pd.Timestamp("2017-03-01", tz="UTC"), # one ladder on Y dead
-    pd.Timestamp("2018-02-27", tz="UTC"), # one ladder on Y dead
+    pd.Timestamp("2017-02-28", tz="UTC"), # one ladder on Y dead
+    # pd.Timestamp("2018-02-27", tz="UTC"), # one ladder on Y dead
     pd.Timestamp("2018-12-04", tz="UTC"), # Something
-    pd.Timestamp("2019-04-06", tz="UTC"), # Something
+    pd.Timestamp("2019-05-03", tz="UTC"), # Something
+    pd.Timestamp("2019-09-24", tz="UTC"), # Something
+    pd.Timestamp("2020-01-27", tz="UTC"), # Something
+    pd.Timestamp("2021-03-05", tz="UTC"), # Something
     TMAX_GLOB,
 ])
 
