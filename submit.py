@@ -18,9 +18,12 @@ log_path = proj_path / "logs"
 shutil.rmtree(log_path, ignore_errors=True)
 log_path.mkdir(parents=True, exist_ok=True)
 
+# data_path = proj_path / "data"
+# shutil.rmtree(data_path / "flux*.pkl", ignore_errors=True)
+
 t1 = pd.Timestamp("2012-01-01", tz="UTC")
 t2 = pd.Timestamp("2025-10-01", tz="UTC")
-times = pd.date_range(start=t1, end=t2, freq=pd.Timedelta(days=1))[::300]
+times = pd.date_range(start=t1, end=t2, freq=pd.Timedelta(days=1))[::500]
 
 itemdata = []
 for i in range(len(times) - 1):
@@ -33,7 +36,7 @@ for i in range(len(times) - 1):
 
 job = htcondor.Submit({
     "executable": f"{proj_path.resolve().as_posix()}/wrapper.sh",
-    "arguments": "$(Process) $(t1) $(t2)",
+    "arguments": "$(t1) $(t2)",
     "output": f"{log_path.resolve().as_posix()}/condor_$(Process).out",
     "error": f"{log_path.resolve().as_posix()}/condor_$(Process).err",
     "log": f"{log_path.resolve().as_posix()}/condor.log",

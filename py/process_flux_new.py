@@ -26,10 +26,9 @@ import psutil
 import uproot as up
 
 import mypy.constants as const
-import mypy.process as proc
 import mypy.pyspline as pyspl
-from mypy.process import ProcessorData, acc_spline
-
+import mypy.process_data as proc_data
+import mypy.process_mc as proc_mc
 
 # ---------------------------------------------------------------------------
 # Tuning knobs
@@ -127,7 +126,7 @@ def load_mc(path: str) -> dict[str, np.ndarray]:
 # ---------------------------------------------------------------------------
 def calc_spline(gr, xmin=None, xmax=None):
     """Smooth the MC->data efficiency correction with a log-linear spline."""
-    det = gr.name[0]
+    det = gr.name
     gr_filtered = gr.dropna()
     x = gr_filtered.index.get_level_values("rig").mid
     xmin = x.min() if const.X_LIMS_AVG2MC[det][0] is None else const.X_LIMS_AVG2MC[det][0]
@@ -136,7 +135,7 @@ def calc_spline(gr, xmin=None, xmax=None):
         return None
     model = pyspl.fit_spline(
         x, gr_filtered["corr_avg2mc"], gr_filtered["corr_avg2mc_err"],
-        mode="log-lin", extrapolation=["tangent", "constant"],
+        mode="log-lin", extrapolation=["constant", "constant"],
         lam=5, x_low=xmin, x_high=xmax,
     )
     gr["corr_avg2mc_spl"] = pyspl.eval_spline(model, gr.index.get_level_values("rig").mid)
@@ -146,25 +145,26 @@ def calc_spline(gr, xmin=None, xmax=None):
 def unfold_iter(cr, eff, flux_model_x, flux_model_y, flux_model_y_err,
                 rig_gen, mask, bins, acc_gen_t, weights_buf=None):
     """One unfolding iteration: reweight MC, recompute corrections and flux."""
-    eff_mc, acc = proc.reweight(
+    eff_mc, acc = proc_mc.reweight(
         rig_gen, mask, bins, acc_gen_t,
         flux_model_x, flux_model_y, flux_model_y_err,
         weights_out=weights_buf,
     )
 
-    eff["corr_avg2mc"] = eff["eff_avg"] / eff_mc["eff"]
-    eff["corr_avg2mc_err"] = (
-        (eff["eff_err_avg"] / eff["eff_avg"]) ** 2
-        + (eff_mc["eff_err"] / eff_mc["eff"]) ** 2
-    ) ** 0.5
-    eff = eff.groupby(["det", "time_avg"], group_keys=False).apply(calc_spline)
-    eff["corr"] = eff["corr_avg2mc_spl"] * eff["eff_daily2avg_spl"]
+    eff['corr_avg2mc'] = eff['eff_avg'] / eff_mc['eff']
+    eff["corr_avg2mc_err"] = ((eff["eff_err_avg"] / eff["eff_avg"])**2 + (eff_mc["eff_err"] / eff_mc["eff"])**2)**0.5
+    # eff_avg["corr_avg2mc"] = eff_avg["eff"] / eff_mc["eff"]
+    # eff_avg["corr_avg2mc_err"] = ((eff_avg["eff_err"] / eff_avg["eff"])**2 + (eff_mc["eff_err"] / eff_mc["eff"])**2)**0.5
+    eff = eff.groupby("det", group_keys=False).apply(calc_spline)
+    eff.sort_index(inplace=True)
+
+    eff["corr"] = eff["corr_avg2mc_spl"] * eff["eff_daily2avg_rigfit"]
 
     fx = cr.copy()
-    fx["corr_daily2avg"] = eff["eff_daily2avg_spl"].unstack("det").prod(axis=1)
-    fx["corr_avg2mc"] = eff["corr_avg2mc_spl"].unstack("det").prod(axis=1)
+    fx["eff_daily2avg_rigfit"] = eff["eff_daily2avg_rigfit"].unstack("det").prod(axis=1)
+    fx["corr_avg2mc_spl"] = eff["corr_avg2mc_spl"].unstack("det").prod(axis=1)
     fx["corr"] = eff["corr"].unstack("det").prod(axis=1)
-    fx["acc"] = acc_spline(fx.index.mid, acc.index.mid, acc["eff"].values)
+    fx["acc"] = proc_mc.acc_spline(fx.index.mid, acc.index.mid, acc["eff"].values)
     fx["fx"] = fx["cr"] / (fx["acc"] * fx["corr"])
     fx["fx_err"] = fx["cr_err"] / (fx["acc"] * fx["corr"])
     return fx
@@ -173,7 +173,7 @@ def unfold_iter(cr, eff, flux_model_x, flux_model_y, flux_model_y_err,
 # ---------------------------------------------------------------------------
 # Worker
 # ---------------------------------------------------------------------------
-PROC_DATA: Optional[ProcessorData] = None
+PROC_DATA: Optional[proc_data.ProcessorData] = None
 SHARED: dict = {}
 
 
@@ -181,7 +181,7 @@ def init_worker(shared_meta: dict) -> None:
     """ProcessPoolExecutor initializer: load ISS data and attach shared MC."""
     global PROC_DATA, SHARED
 
-    PROC_DATA = ProcessorData(str(const.ISS_PATH), prefix=const.PREFIX)
+    PROC_DATA = proc_data.ProcessorData(str(const.ISS_PATH))
     PROC_DATA.load()
 
     SHARED = attach_shared_arrays(shared_meta)
@@ -214,6 +214,7 @@ def process_day(t: pd.Timestamp):
     try:
         cr = PROC_DATA.count_rate.loc[t, ["cr", "cr_err"]]
         eff = PROC_DATA.effs_daily.xs(t, level="time")
+        # eff_avg = PROC_DATA.effs_avg
     except KeyError:
         print(f"No data for {t}")
         return None
@@ -246,11 +247,10 @@ def process_day(t: pd.Timestamp):
 def main(argv: list[str]) -> None:
     if (argv[1] == 'recreate'):
         print("Recreating efficiencies...")
-        proc_data = ProcessorData(str(const.ISS_PATH), prefix=const.PREFIX)
-        proc_data.init_count_rate()
-        proc_data.load_efficiencies()
-        proc_data.calc_efficiencies()
-        proc_data.save()
+        data = proc_data.ProcessorData(str(const.ISS_PATH))
+        data.init_count_rate()
+        data.recreate_efficiencies()
+        data.save()
         print("Efficiencies recreated successfully")
         return
 
@@ -271,10 +271,10 @@ def main(argv: list[str]) -> None:
     t1 = pd.Timestamp(argv[1], tz="UTC")
     t2 = pd.Timestamp(argv[2], tz="UTC")
     tt = pd.date_range(t1, t2, freq="D")
-    tt = np.random.choice(tt, size=1000, replace=False)
-    cr = ProcessorData(str(const.ISS_PATH), prefix=const.PREFIX)
+    tt = np.random.choice(tt, size=400, replace=False)
+    cr = proc_data.ProcessorData(str(const.ISS_PATH))
     cr.load()
-    cr = cr.count_rate.index.get_level_values('time').unique()
+    cr = cr.count_rate.dropna().index.get_level_values('time').unique()
     tt = tt[np.isin(tt, cr)]
 
     results: list = {}
@@ -301,7 +301,7 @@ def main(argv: list[str]) -> None:
             executor.shutdown(wait=False, cancel_futures=True)
         raise
     finally:
-        out_path = const.DATA_DIR / f"flux_daily_{argv[1]}_{argv[2]}.pkl"
+        out_path = const.OUTPUT_DIR / f"flux_daily_{argv[1]}_{argv[2]}.pkl"
         results = pd.concat(results, names=["time"])
         pd.to_pickle(results, out_path)
         if executor is not None:

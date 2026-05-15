@@ -98,6 +98,9 @@ def broken_power_low_energy_log(R, logA, Rb, gamma1, Rc, alpha):
     log_low = -(Rc / R)**alpha
     return logA + log_broken + log_low
 
+def fit_linear(x, a, b):
+    return a * x + b
+
 @njit(cache=True)
 def bplel_weights_numba(R, logA, Rb, gamma1, Rc, alpha, log_ratio, out):
     """Compute weights = exp(broken_power_low_energy_log(R, ...)) * R * log_ratio in-place.
@@ -191,11 +194,9 @@ class ProcessorMC:
         self._eff_idx = pd.MultiIndex.from_product([const.DETS.keys(), const.RBINS], names=['det', 'rig'])
 
 class ProcessorData:
-    def __init__(self, file_path, prefix=""):
+    def __init__(self, file_path):
         self.file_path = file_path
         self.fileUPROOT = up.open(file_path)
-
-        self.prefix = prefix
 
     def init_count_rate(self):
         lv = self.fileUPROOT["livetime"]
@@ -223,56 +224,71 @@ class ProcessorData:
         self.effs = df
     
     def calc_efficiencies(self):
-        self.load_efficiencies()
-
         self.effs['tr'] = (self.effs['tr'].reset_index('rig').groupby('rig').rolling("14D", center=True).sum().swaplevel().sort_index())
         self.effs_avg = {}
         self.effs_daily = {}
 
-        def calc_spline(gr, xmin=None, xmax=None):
-            gr_filtered = gr.dropna()
-            x = gr_filtered.index.get_level_values('rig').mid
-            xmin = x.min() if xmin is None else xmin
-            xmax = x.max() if xmax is None else xmax
-            if len(x[(x > xmin) & (x < xmax)]) < 5:
-                return None
-            model = pyspl.fit_spline(x, gr_filtered['eff_daily2avg'], gr_filtered['eff_daily2avg_err'], mode="log-lin", extrapolation=['tangent', 'constant'], lam=5, x_low=xmin, x_high=xmax)
-            gr['eff_daily2avg_spl'] = pyspl.eval_spline(model, gr.index.get_level_values('rig').mid)
+        def fit_linear(x, a, b):
+            return a * x + b
+
+        def fit_time(gr):
+            x = gr.index.get_level_values('time').view("int64")
+            y = gr['eff_daily'].to_numpy()
+            y_err = gr['eff_err_daily'].to_numpy()
+
+            mask = (np.isfinite(x) & np.isfinite(y) & np.isfinite(y_err) & (y_err>0))
+            if mask.sum() < 5:
+                gr['eff_avg_fit'] = np.nan
+                return gr
+            
+            x0 = np.min(x[mask])
+            p, m = curve_fit(fit_linear, x[mask] - x0, y[mask], sigma=y_err[mask], absolute_sigma=True, p0=(1.0, np.mean(y[mask])))
+            gr['eff_avg_fit'] = fit_linear(x - x0, *p)
             return gr
         
+        def fit_rig(gr, xmin=None, xmax=None):
+            x = gr.index.get_level_values('rig').mid.to_numpy()
+            y = (gr['eff_daily'] / gr['eff_avg_fit']).to_numpy()
+            y_err = (gr['eff_err_daily'] / gr['eff_avg_fit']).to_numpy()
+
+            xmin = x.min() if xmin is None else xmin
+            xmax = x.max() if xmax is None else xmax
+            mask = (np.isfinite(x) & (x>xmin) & (x<xmax) & np.isfinite(y) & np.isfinite(y_err) & (y_err>0))
+            if mask.sum() < 5:
+                gr['eff_daily2avg_spl'] = np.nan
+                return gr
+
+            model = pyspl.fit_spline(x[mask], y[mask], y_err[mask], mode="log-lin", extrapolation=['tangent', 'constant'], lam=5, x_low=xmin, x_high=xmax)
+            gr['eff_daily2avg_spl'] = pyspl.eval_spline(model, x)
+            return gr
+
         for key, gr in self.effs.items():
             tbins_avg = pd.cut(gr.index.get_level_values('time'), bins=const.AVG_PERIODS[key], right=False)
-
+            
             # daily efficiencies
             eff, err = calc_eff_weighted(gr['p'], gr['t'], gr['pw2'], gr['tw2'])
-            df_daily = pd.DataFrame({'eff_daily': eff.ravel(), 'eff_err_daily': err.ravel()}, index=gr.index)
-            df_daily['time_avg'] = tbins_avg
+            df = pd.DataFrame({'eff_daily': eff.ravel(), 'eff_err_daily': err.ravel()}, index=gr.index)
 
-            # average efficiencies
-            df = gr.groupby([tbins_avg, 'rig']).sum()
-            eff, err = calc_eff_weighted(df['p'], df['t'], df['pw2'], df['tw2'])
-            df_avg = pd.DataFrame({'eff_avg': eff.ravel(), 'eff_err_avg': err.ravel()}, index=df.index)
-            df_avg.index.names = ['time_avg', 'rig']
-            self.effs_avg[key] = df_avg
-
-            df_daily = df_daily.reset_index().merge(df_avg.reset_index(), on=['time_avg', 'rig'], how='left', suffixes=('_daily', '_avg')).dropna().set_index(['time', 'rig']).sort_index()
-            df_daily['eff_daily2avg'] = df_daily['eff_daily'] / df_daily['eff_avg']
-            df_daily['eff_daily2avg_err'] = ((df_daily['eff_err_daily'] / df_daily['eff_daily']) ** 2 + (df_daily['eff_err_avg'] / df_daily['eff_avg']) ** 2) ** 0.5
-
-            df_daily = df_daily.groupby('time', group_keys=False).apply(calc_spline, xmin=const.X_LIMS_DAY2AVG[key][0], xmax=const.X_LIMS_DAY2AVG[key][1])
+            # fit with time
+            df['time_avg'] = tbins_avg
+            df = df.groupby(['rig', 'time_avg'], group_keys=False, observed=True).apply(fit_time)
             
-            self.effs_daily[key] = df_daily
-
-        self.effs_avg = pd.concat(self.effs_avg, names=['det']).sort_index()
+            # fit with rig
+            df = df.groupby('time', group_keys=False, observed=True).apply(fit_rig, xmin=const.X_LIMS_DAY2AVG[key][0], xmax=const.X_LIMS_DAY2AVG[key][1])
+            self.effs_daily[key] = df
+            
         self.effs_daily = pd.concat(self.effs_daily, names=['det']).sort_index()
 
     def save(self):
-        pd.to_pickle(self.count_rate, f"{const.DATA_DIR}/count_rate{self.prefix}.pkl")
-        pd.to_pickle(self.effs_daily, f"{const.DATA_DIR}/effs_daily{self.prefix}.pkl")
-        pd.to_pickle(self.effs_avg, f"{const.DATA_DIR}/effs_avg{self.prefix}.pkl")
+        const.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        pd.to_pickle(self.count_rate, f"{const.OUTPUT_DIR}/count_rate.pkl")
+        pd.to_pickle(self.effs_daily, f"{const.OUTPUT_DIR}/effs_daily.pkl")
+        pd.to_pickle(self.effs_avg, f"{const.OUTPUT_DIR}/effs_avg.pkl")
     
     def load(self):
-        self.count_rate = pd.read_pickle(f"{const.DATA_DIR}/count_rate{self.prefix}.pkl")
-        self.effs_daily = pd.read_pickle(f"{const.DATA_DIR}/effs_daily{self.prefix}.pkl")
-        self.effs_avg = pd.read_pickle(f"{const.DATA_DIR}/effs_avg{self.prefix}.pkl")
+        if not const.OUTPUT_DIR.exists():
+            raise FileNotFoundError(f"Output directory {const.OUTPUT_DIR} does not exist")
+        self.count_rate = pd.read_pickle(f"{const.OUTPUT_DIR}/count_rate.pkl")
+        self.effs_daily = pd.read_pickle(f"{const.OUTPUT_DIR}/effs_daily.pkl")
+        self.effs_avg = pd.read_pickle(f"{const.OUTPUT_DIR}/effs_avg.pkl")
 
